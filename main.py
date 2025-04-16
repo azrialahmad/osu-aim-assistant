@@ -234,7 +234,7 @@ class DetectionThread(QThread):
             camera = dxcam.create(output_idx=0, output_color="RGB")
             if camera is None:
                 print("Error: Failed to initialize DXcam camera")
-                return None
+                return None, 0, 0
                 
             return camera, screen_width, screen_height
             
@@ -472,17 +472,21 @@ class DetectionThread(QThread):
     
     def move_mouse_relative(self, dx, dy):
         """
-        Move the mouse using the appropriate method based on input device setting
+        Move the mouse using the appropriate method based on input device setting.
+        Optimized for both mouse and tablet inputs with low latency.
         """
         try:
             if SETTINGS["input_device"] == "tablet":
-                # Use mouse library for better tablet support
-                curr_x, curr_y = mouse.get_position()
+                # For tablets, absolute positioning works better than relative
+                # Get current position first
+                curr_x, curr_y = win32api.GetCursorPos()
                 new_x = int(curr_x + dx)
                 new_y = int(curr_y + dy)
-                mouse.move(new_x, new_y)
+                
+                # Use direct Windows API for lowest latency
+                win32api.SetCursorPos((new_x, new_y))
             else:
-                # Use SendInput for relative movement (lower latency for mouse)
+                # For mouse, use SendInput for lower latency relative movement
                 self.send_mouse_input(dx, dy)
         except Exception as e:
             print(f"Mouse movement failed ({e}), falling back to SetCursorPos")
@@ -508,37 +512,48 @@ class DetectionThread(QThread):
             # Get current mouse position
             curr_x, curr_y = win32api.GetCursorPos()
             
-            # Calculate distance (account for screen region offset)
-            # Adjust these offsets based on your capture region
-            region_left = region[0]  # Left offset of capture region
-            region_top = region[1]   # Top offset of capture region
+            # Adjust for screen region offset
+            region_left = region[0]
+            region_top = region[1]
             
+            # Calculate vector to target
             dx = target_x + region_left - curr_x
             dy = target_y + region_top - curr_y
             
-            # Apply aim assist based on selected mode
+            # Simple EMA smoothing for more natural movement
+            if not hasattr(self, 'last_dx'):
+                self.last_dx = 0
+                self.last_dy = 0
+            
+            # EMA smoothing factor - adjust as needed
+            ema_factor = 0.3
+            
+            # Apply EMA smoothing
+            smoothed_dx = ema_factor * dx + (1 - ema_factor) * self.last_dx
+            smoothed_dy = ema_factor * dy + (1 - ema_factor) * self.last_dy
+            
+            # Update last values
+            self.last_dx = smoothed_dx
+            self.last_dy = smoothed_dy
+            
+            # Apply strength based on selected aim mode
             if SETTINGS["aim_mode"] == "snap":
-                # Instant snap to target
-                move_x = dx * SETTINGS["assist_strength"]
-                move_y = dy * SETTINGS["assist_strength"]
-                self.move_mouse_relative(move_x, move_y)
+                # Direct snap toward target with strength factor
+                move_x = smoothed_dx * SETTINGS["assist_strength"]
+                move_y = smoothed_dy * SETTINGS["assist_strength"]
                 
             elif SETTINGS["aim_mode"] == "smooth":
-                # Smooth movement towards target
-                move_x = dx * SETTINGS["assist_strength"] * 0.1
-                move_y = dy * SETTINGS["assist_strength"] * 0.1
-                self.move_mouse_relative(move_x, move_y)
+                # Gentle movement - good for smaller adjustments
+                move_x = smoothed_dx * SETTINGS["assist_strength"] * 0.1
+                move_y = smoothed_dy * SETTINGS["assist_strength"] * 0.1
                 
-            elif SETTINGS["aim_mode"] == "interpolate":
-                # Interpolated movement (more natural looking)
-                move_x = dx * SETTINGS["assist_strength"] * 0.05
-                move_y = dy * SETTINGS["assist_strength"] * 0.05
-                
-                # Apply easing function for more natural movement
-                ease_factor = 0.2
-                move_x = move_x * (1 - (abs(dx) / SETTINGS["capture_width"] * ease_factor))
-                move_y = move_y * (1 - (abs(dy) / SETTINGS["capture_height"] * ease_factor))
-                
+            else:  # "interpolate" - default
+                # Balanced approach - faster when far, slower when close
+                move_x = smoothed_dx * SETTINGS["assist_strength"] * 0.05
+                move_y = smoothed_dy * SETTINGS["assist_strength"] * 0.05
+            
+            # Apply movement if significant enough
+            if abs(move_x) > 0.1 or abs(move_y) > 0.1:
                 self.move_mouse_relative(move_x, move_y)
     
     def stop(self):
