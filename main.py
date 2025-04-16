@@ -520,15 +520,16 @@ class DetectionThread(QThread):
             dx = target_x + region_left - curr_x
             dy = target_y + region_top - curr_y
             
-            # Simple EMA smoothing for more natural movement
+            # Enhanced EMA smoothing for more natural movement
             if not hasattr(self, 'last_dx'):
                 self.last_dx = 0
                 self.last_dy = 0
             
-            # EMA smoothing factor - adjust as needed
-            ema_factor = 0.3
+            # EMA smoothing factor - lower value = more smoothing
+            # Reduced from 0.3 to 0.2 for smoother movement
+            ema_factor = 0.2
             
-            # Apply EMA smoothing
+            # Apply enhanced EMA smoothing
             smoothed_dx = ema_factor * dx + (1 - ema_factor) * self.last_dx
             smoothed_dy = ema_factor * dy + (1 - ema_factor) * self.last_dy
             
@@ -536,24 +537,34 @@ class DetectionThread(QThread):
             self.last_dx = smoothed_dx
             self.last_dy = smoothed_dy
             
+            # Get strength - increased multiplier for stronger effect at 100%
+            strength = SETTINGS["assist_strength"] * 1.5  # Multiplier increased from 1.0 to 1.5
+            
             # Apply strength based on selected aim mode
             if SETTINGS["aim_mode"] == "snap":
-                # Direct snap toward target with strength factor
-                move_x = smoothed_dx * SETTINGS["assist_strength"]
-                move_y = smoothed_dy * SETTINGS["assist_strength"]
+                # Direct snap toward target with increased strength factor
+                move_x = smoothed_dx * strength
+                move_y = smoothed_dy * strength
                 
             elif SETTINGS["aim_mode"] == "smooth":
-                # Gentle movement - good for smaller adjustments
-                move_x = smoothed_dx * SETTINGS["assist_strength"] * 0.1
-                move_y = smoothed_dy * SETTINGS["assist_strength"] * 0.1
+                # Gentle movement - increased from 0.1 to 0.15 for smoother control
+                move_x = smoothed_dx * strength * 0.15
+                move_y = smoothed_dy * strength * 0.15
                 
             else:  # "interpolate" - default
-                # Balanced approach - faster when far, slower when close
-                move_x = smoothed_dx * SETTINGS["assist_strength"] * 0.05
-                move_y = smoothed_dy * SETTINGS["assist_strength"] * 0.05
+                # Balanced approach - increased from 0.05 to 0.08
+                move_x = smoothed_dx * strength * 0.08
+                move_y = smoothed_dy * strength * 0.08
+            
+            # Apply additional movement smoothing
+            # This helps reduce jitter when small movements are applied
+            if abs(move_x) < 5 and abs(move_y) < 5:
+                # For very small movements, apply extra smoothing to reduce jitter
+                move_x *= 0.8
+                move_y *= 0.8
             
             # Apply movement if significant enough
-            if abs(move_x) > 0.1 or abs(move_y) > 0.1:
+            if abs(move_x) > 0.2 or abs(move_y) > 0.2:  # Increased threshold slightly
                 self.move_mouse_relative(move_x, move_y)
     
     def stop(self):
@@ -584,11 +595,20 @@ class MainWindow(QMainWindow):
         # Initialize variables
         self.detection_thread = None
         
+        # Force detection to be disabled on startup - making this more explicit
+        SETTINGS["enabled"] = False
+        
         # Set up the UI
         self.init_ui()
         
         # Load settings (must be done after UI setup)
         self.load_settings()
+        
+        # Force detection to be disabled again after loading settings 
+        # This ensures it's disabled even if a profile had it enabled
+        SETTINGS["enabled"] = False
+        self.update_detection_status()
+        self.update_toggle_button_style()
         
         # Initialize the detection thread (must be done after settings are loaded)
         self.init_detection_thread()
@@ -1148,7 +1168,9 @@ class MainWindow(QMainWindow):
                 # Update global settings with saved values
                 for key, value in saved_settings.items():
                     if key in SETTINGS:
-                        SETTINGS[key] = value
+                        # Skip the "enabled" key to ensure it starts disabled
+                        if key != "enabled":
+                            SETTINGS[key] = value
                 
                 # Load available profiles
                 self.load_profiles()
@@ -1156,7 +1178,15 @@ class MainWindow(QMainWindow):
                 # Update UI with loaded settings
                 self.confidence_slider.setValue(int(SETTINGS["confidence_threshold"] * 100))
                 self.strength_slider.setValue(int(SETTINGS["assist_strength"] * 100))
-                self.aim_mode_combo.setCurrentIndex(SETTINGS["aim_mode"])
+                
+                # Handle aim_mode properly
+                if isinstance(SETTINGS["aim_mode"], int):
+                    # If it's an integer index, use setCurrentIndex
+                    if 0 <= SETTINGS["aim_mode"] < self.aim_mode_combo.count():
+                        self.aim_mode_combo.setCurrentIndex(SETTINGS["aim_mode"])
+                else:
+                    # If it's a string, use setCurrentText
+                    self.aim_mode_combo.setCurrentText(SETTINGS["aim_mode"])
                 
                 self.width_spinbox.setValue(SETTINGS["capture_width"])
                 self.height_spinbox.setValue(SETTINGS["capture_height"])
@@ -1174,6 +1204,9 @@ class MainWindow(QMainWindow):
                     self.profile_combo.setCurrentIndex(index)
                 
                 print("Settings loaded successfully")
+                
+                # Make sure enabled is always false on startup
+                SETTINGS["enabled"] = False
         except Exception as e:
             print(f"Error loading settings: {e}")
     
@@ -1248,10 +1281,12 @@ class MainWindow(QMainWindow):
                 with open(profile_path, 'r') as f:
                     profile_settings = json.load(f)
                 
-                # Update settings with profile values
+                # Update settings with profile values but ensure detection remains disabled
                 for key, value in profile_settings.items():
                     if key in SETTINGS:
-                        SETTINGS[key] = value
+                        # Skip the "enabled" key to ensure it stays disabled
+                        if key != "enabled":
+                            SETTINGS[key] = value
                 
                 # Update profile name
                 SETTINGS["profile_name"] = profile_name
@@ -1259,7 +1294,15 @@ class MainWindow(QMainWindow):
                 # Update UI with loaded settings
                 self.confidence_slider.setValue(int(SETTINGS["confidence_threshold"] * 100))
                 self.strength_slider.setValue(int(SETTINGS["assist_strength"] * 100))
-                self.aim_mode_combo.setCurrentIndex(SETTINGS["aim_mode"])
+                
+                # Handle aim_mode properly
+                if isinstance(SETTINGS["aim_mode"], int):
+                    # If it's an integer index, use setCurrentIndex
+                    if 0 <= SETTINGS["aim_mode"] < self.aim_mode_combo.count():
+                        self.aim_mode_combo.setCurrentIndex(SETTINGS["aim_mode"])
+                else:
+                    # If it's a string, use setCurrentText
+                    self.aim_mode_combo.setCurrentText(SETTINGS["aim_mode"])
                 
                 self.width_spinbox.setValue(SETTINGS["capture_width"])
                 self.height_spinbox.setValue(SETTINGS["capture_height"])
@@ -1270,6 +1313,11 @@ class MainWindow(QMainWindow):
                 self.simple_capture_check.setChecked(SETTINGS["simple_capture"])
                 self.debug_logging_check.setChecked(SETTINGS["debug_logging"])
                 self.half_precision_check.setChecked(SETTINGS["half_precision"])
+                
+                # Make sure enabled is always false when loading a profile
+                SETTINGS["enabled"] = False
+                self.update_detection_status()
+                self.update_toggle_button_style()
                 
                 # Save updated settings
                 self.save_settings()
