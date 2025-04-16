@@ -1,0 +1,10 @@
+numpy>=1.19.0
+opencv-python>=4.5.4
+torch>=1.12.0
+torchvision>=0.13.0
+dxcam>=0.0.5
+PyQt5>=5.15.0
+pywin32>=301
+ultralytics>=8.0.0
+pynput>=1.7.6
+mouse>=0.7.1 
