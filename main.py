@@ -13,38 +13,41 @@ import mouse  # For tablet support
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
                            QWidget, QLabel, QSlider, QPushButton, QCheckBox, 
                            QGroupBox, QComboBox, QSpinBox, QFileDialog, QMessageBox,
-                           QRadioButton, QButtonGroup)
+                           QRadioButton, QButtonGroup, QInputDialog)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer
 from PyQt5.QtGui import QPixmap, QImage
 from pynput import keyboard
+import json
 
 # Global settings
 SETTINGS = {
-    "confidence_threshold": 0.5,
+    "confidence_threshold": 0.6,
     "assist_strength": 0.5,
     "enabled": False,
-    "aim_mode": "snap",  # snap, smooth, interpolate
-    "capture_width": 800,
-    "capture_height": 600,
+    "aim_mode": 0,
+    "capture_width": 1280,
+    "capture_height": 720,
     "model_path": "",
     "show_overlay": True,
-    "target_fps": 60,
+    "target_fps": 144,
     "always_on_top": False,
-    "preview_enabled": False,  # New setting for toggling preview
-    "target_class": 0,         # Default class index for active_note
-    "input_device": "mouse",   # "mouse" or "tablet"
-    "use_play_area": True,     # Whether to use 4:3 play area optimization
-    "simple_capture": False,   # Use simple capture mode (for troubleshooting)
-    "debug_logging": False     # Enable debug logging (like region prints)
+    "preview_enabled": True,
+    "target_class": 0,  # 0 for circles
+    "input_device": "mouse",
+    "use_play_area": False,
+    "simple_capture": True,
+    "debug_logging": False,
+    "profile_name": "Default",
+    "half_precision": False
 }
 
-# Class mapping (make sure to update these based on your model)
-CLASS_MAPPING = {
-    0: "active_note",
-    1: "mouse",
-    2: "next_note",
-    3: "slider_ball"
-}
+# Paths
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+PROFILES_DIR = os.path.join(APP_DIR, "profiles")
+SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
+
+# Class mapping for the model
+CLASS_MAPPING = []
 
 class DetectionThread(QThread):
     update_frame = pyqtSignal(np.ndarray, list)
@@ -88,6 +91,12 @@ class DetectionThread(QThread):
             from ultralytics import YOLO
             self.model = YOLO(model_path)
             
+            # Apply half precision if enabled and CUDA is available 
+            # This can significantly improve performance on compatible GPUs
+            if SETTINGS["half_precision"] and cuda_available:
+                print("Using half precision (FP16) for improved performance")
+                self.model.model.half()  # Convert model to half precision
+            
             # Set initial confidence threshold
             self.conf = SETTINGS["confidence_threshold"]  # Store locally
             
@@ -101,11 +110,12 @@ class DetectionThread(QThread):
                 print(f"Model classes: {CLASS_MAPPING}")
                 
                 # Try to find the active_note class
-                for idx, name in CLASS_MAPPING.items():
-                    if "active" in name.lower():
-                        SETTINGS["target_class"] = idx
-                        print(f"Setting target class to {idx}: {name}")
-                        break
+                if isinstance(CLASS_MAPPING, dict):
+                    for idx, name in CLASS_MAPPING.items():
+                        if "active" in name.lower():
+                            SETTINGS["target_class"] = idx
+                            print(f"Setting target class to {idx}: {name}")
+                            break
             
             return True
         except Exception as e:
@@ -646,8 +656,12 @@ class MainWindow(QMainWindow):
         target_class_layout.addWidget(QLabel("Target Class:"))
         self.target_class_combo = QComboBox()
         self.target_class_combo.addItem("All Classes", -1)
-        for idx, name in CLASS_MAPPING.items():
-            self.target_class_combo.addItem(f"{name} ({idx})", idx)
+        
+        # Check if CLASS_MAPPING is a dictionary
+        if isinstance(CLASS_MAPPING, dict):
+            for idx, name in CLASS_MAPPING.items():
+                self.target_class_combo.addItem(f"{name} ({idx})", idx)
+                
         self.target_class_combo.setCurrentIndex(0)
         self.target_class_combo.currentIndexChanged.connect(self.update_target_class)
         target_class_layout.addWidget(self.target_class_combo)
@@ -682,8 +696,20 @@ class MainWindow(QMainWindow):
         aim_mode_group = QGroupBox("Aim Mode")
         aim_mode_layout = QVBoxLayout(aim_mode_group)
         self.aim_mode_combo = QComboBox()
-        self.aim_mode_combo.addItems(["snap", "smooth", "interpolate"])
-        self.aim_mode_combo.setCurrentText(SETTINGS["aim_mode"])
+        
+        # Add aim modes
+        aim_modes = ["snap", "smooth", "interpolate"]
+        self.aim_mode_combo.addItems(aim_modes)
+        
+        # Set current aim mode - handle both string and integer values
+        if isinstance(SETTINGS["aim_mode"], int):
+            # If it's an integer index, use setCurrentIndex
+            if 0 <= SETTINGS["aim_mode"] < len(aim_modes):
+                self.aim_mode_combo.setCurrentIndex(SETTINGS["aim_mode"])
+        else:
+            # If it's a string, use setCurrentText
+            self.aim_mode_combo.setCurrentText(SETTINGS["aim_mode"])
+            
         self.aim_mode_combo.currentTextChanged.connect(self.update_aim_mode)
         aim_mode_layout.addWidget(self.aim_mode_combo)
         
@@ -746,11 +772,51 @@ class MainWindow(QMainWindow):
         self.debug_logging_check.toggled.connect(self.update_debug_logging)
         self.debug_logging_check.setToolTip("Enable debug output (may reduce performance)")
         
+        self.half_precision_check = QCheckBox("Use Half Precision (FP16)")
+        self.half_precision_check.setChecked(SETTINGS["half_precision"])
+        self.half_precision_check.toggled.connect(self.update_half_precision)
+        self.half_precision_check.setToolTip("Use FP16 for better performance (requires CUDA)")
+        
         checks_layout.addWidget(self.show_overlay_check)
         checks_layout.addWidget(self.always_top_check)
         checks_layout.addWidget(self.play_area_check)
         checks_layout.addWidget(self.simple_capture_check)
         checks_layout.addWidget(self.debug_logging_check)
+        checks_layout.addWidget(self.half_precision_check)
+        
+        # Config profile management
+        profile_group = QGroupBox("Configuration Profiles")
+        profile_layout = QVBoxLayout(profile_group)
+        
+        # Profile selection
+        profile_combo_layout = QHBoxLayout()
+        profile_combo_layout.addWidget(QLabel("Current Profile:"))
+        self.profile_combo = QComboBox()
+        self.profile_combo.setEditable(False)
+        self.profile_combo.currentTextChanged.connect(self.load_profile)
+        profile_combo_layout.addWidget(self.profile_combo, 1)  # 1 = stretch factor
+        
+        # Profile buttons
+        profile_buttons_layout = QHBoxLayout()
+        
+        self.save_profile_btn = QPushButton("Save")
+        self.save_profile_btn.clicked.connect(self.save_profile)
+        self.save_profile_btn.setToolTip("Save current settings to the selected profile")
+        
+        self.save_as_profile_btn = QPushButton("Save As")
+        self.save_as_profile_btn.clicked.connect(self.save_profile_as)
+        self.save_as_profile_btn.setToolTip("Save current settings to a new profile")
+        
+        self.delete_profile_btn = QPushButton("Delete")
+        self.delete_profile_btn.clicked.connect(self.delete_profile)
+        self.delete_profile_btn.setToolTip("Delete the selected profile")
+        
+        profile_buttons_layout.addWidget(self.save_profile_btn)
+        profile_buttons_layout.addWidget(self.save_as_profile_btn)
+        profile_buttons_layout.addWidget(self.delete_profile_btn)
+        
+        profile_layout.addLayout(profile_combo_layout)
+        profile_layout.addLayout(profile_buttons_layout)
         
         # Input device selection
         input_device_group = QGroupBox("Input Device")
@@ -791,6 +857,7 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(checks_group)
         settings_layout.addWidget(input_device_group)  # Add input device group
         settings_layout.addWidget(self.toggle_button)
+        settings_layout.addWidget(profile_group)
         
         # Add stretch to push everything up
         settings_layout.addStretch()
@@ -845,8 +912,11 @@ class MainWindow(QMainWindow):
                 conf = det['confidence']
                 cls = det['class']
                 
-                # Get class name
-                class_name = CLASS_MAPPING.get(cls, f"Class {cls}")
+                # Get class name - handle either dict or list
+                if isinstance(CLASS_MAPPING, dict):
+                    class_name = CLASS_MAPPING.get(cls, f"Class {cls}")
+                else:
+                    class_name = f"Class {cls}"
                 
                 # Convert bbox coordinates to integers
                 x1, y1, x2, y2 = map(int, bbox)
@@ -932,15 +1002,16 @@ class MainWindow(QMainWindow):
         # Add "All Classes" option
         self.target_class_combo.addItem("All Classes", -1)
         
-        # Add classes from model
-        for idx, name in CLASS_MAPPING.items():
-            self.target_class_combo.addItem(f"{name} ({idx})", idx)
-        
-        # Try to select active_note
-        for i in range(self.target_class_combo.count()):
-            if "active" in self.target_class_combo.itemText(i).lower():
-                self.target_class_combo.setCurrentIndex(i)
-                break
+        # Add classes from model - handle the case where CLASS_MAPPING is not a dict
+        if isinstance(CLASS_MAPPING, dict):
+            for idx, name in CLASS_MAPPING.items():
+                self.target_class_combo.addItem(f"{name} ({idx})", idx)
+            
+            # Try to select active_note
+            for i in range(self.target_class_combo.count()):
+                if "active" in self.target_class_combo.itemText(i).lower():
+                    self.target_class_combo.setCurrentIndex(i)
+                    break
     
     def update_target_class(self, index):
         SETTINGS["target_class"] = self.target_class_combo.currentData()
@@ -1018,6 +1089,18 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("Detection: Running")
             self.status_label.setStyleSheet("color: green;")
+            
+    def show_status_message(self, message, is_error=False):
+        """Show a status message in the status bar"""
+        if is_error:
+            self.statusBar().setStyleSheet("color: red;")
+        else:
+            self.statusBar().setStyleSheet("")
+            
+        self.statusBar().showMessage(message, 3000)
+        
+        # Reset style after 3 seconds
+        QTimer.singleShot(3000, lambda: self.statusBar().setStyleSheet(""))
 
     def toggle_assist(self):
         SETTINGS["enabled"] = not SETTINGS["enabled"]
@@ -1042,105 +1125,237 @@ class MainWindow(QMainWindow):
             self.toggle_button.setText("Enable Aim Assist (F8)")
     
     def load_settings(self):
-        settings = QSettings("OsuAimAssist", "App")
-        
-        SETTINGS["confidence_threshold"] = float(settings.value("confidence_threshold", SETTINGS["confidence_threshold"]))
-        SETTINGS["assist_strength"] = float(settings.value("assist_strength", SETTINGS["assist_strength"]))
-        SETTINGS["aim_mode"] = settings.value("aim_mode", SETTINGS["aim_mode"])
-        SETTINGS["capture_width"] = int(settings.value("capture_width", SETTINGS["capture_width"]))
-        SETTINGS["capture_height"] = int(settings.value("capture_height", SETTINGS["capture_height"]))
-        SETTINGS["model_path"] = settings.value("model_path", SETTINGS["model_path"])
-        SETTINGS["show_overlay"] = settings.value("show_overlay", SETTINGS["show_overlay"]) == "true"
-        SETTINGS["target_fps"] = int(settings.value("target_fps", SETTINGS["target_fps"]))
-        SETTINGS["always_on_top"] = settings.value("always_on_top", SETTINGS["always_on_top"]) == "true"
-        SETTINGS["preview_enabled"] = settings.value("preview_enabled", SETTINGS["preview_enabled"]) == "true"
-        SETTINGS["target_class"] = int(settings.value("target_class", SETTINGS["target_class"]))
-        SETTINGS["input_device"] = settings.value("input_device", SETTINGS["input_device"])
-        SETTINGS["use_play_area"] = settings.value("use_play_area", SETTINGS["use_play_area"]) == "true"
-        SETTINGS["simple_capture"] = settings.value("simple_capture", SETTINGS["simple_capture"]) == "true"
-        SETTINGS["debug_logging"] = settings.value("debug_logging", SETTINGS["debug_logging"]) == "true"
-        
-        # Update UI with loaded settings
-        self.confidence_slider.setValue(int(SETTINGS["confidence_threshold"] * 100))
-        self.strength_slider.setValue(int(SETTINGS["assist_strength"] * 100))
-        self.aim_mode_combo.setCurrentText(SETTINGS["aim_mode"])
-        self.width_spinbox.setValue(SETTINGS["capture_width"])
-        self.height_spinbox.setValue(SETTINGS["capture_height"])
-        self.fps_spinbox.setValue(SETTINGS["target_fps"])
-        self.show_overlay_check.setChecked(SETTINGS["show_overlay"])
-        self.always_top_check.setChecked(SETTINGS["always_on_top"])
-        self.preview_toggle_btn.setChecked(SETTINGS["preview_enabled"])
-        
-        # Set input device radio buttons
-        if hasattr(self, 'mouse_radio') and hasattr(self, 'tablet_radio'):
-            if SETTINGS["input_device"] == "tablet":
-                self.tablet_radio.setChecked(True)
-            else:
-                self.mouse_radio.setChecked(True)
-        
-        # Set play area checkbox if it exists
-        if hasattr(self, 'play_area_check'):
-            self.play_area_check.setChecked(SETTINGS["use_play_area"])
-        
-        # Set simple capture checkbox if it exists
-        if hasattr(self, 'simple_capture_check'):
-            self.simple_capture_check.setChecked(SETTINGS["simple_capture"])
-        
-        # Set debug logging checkbox if it exists
-        if hasattr(self, 'debug_logging_check'):
-            self.debug_logging_check.setChecked(SETTINGS["debug_logging"])
-        
-        if SETTINGS["model_path"]:
-            self.model_path_label.setText(os.path.basename(SETTINGS["model_path"]))
+        try:
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, 'r') as f:
+                    saved_settings = json.load(f)
+                    
+                # Update global settings with saved values
+                for key, value in saved_settings.items():
+                    if key in SETTINGS:
+                        SETTINGS[key] = value
+                
+                # Load available profiles
+                self.load_profiles()
+                
+                # Update UI with loaded settings
+                self.confidence_slider.setValue(int(SETTINGS["confidence_threshold"] * 100))
+                self.strength_slider.setValue(int(SETTINGS["assist_strength"] * 100))
+                self.aim_mode_combo.setCurrentIndex(SETTINGS["aim_mode"])
+                
+                self.width_spinbox.setValue(SETTINGS["capture_width"])
+                self.height_spinbox.setValue(SETTINGS["capture_height"])
+                
+                self.show_overlay_check.setChecked(SETTINGS["show_overlay"])
+                self.always_top_check.setChecked(SETTINGS["always_on_top"])
+                self.play_area_check.setChecked(SETTINGS["use_play_area"])
+                self.simple_capture_check.setChecked(SETTINGS["simple_capture"])
+                self.debug_logging_check.setChecked(SETTINGS["debug_logging"])
+                self.half_precision_check.setChecked(SETTINGS["half_precision"])
+                
+                # Select the current profile in the combobox
+                index = self.profile_combo.findText(SETTINGS["profile_name"])
+                if index >= 0:
+                    self.profile_combo.setCurrentIndex(index)
+                
+                print("Settings loaded successfully")
+        except Exception as e:
+            print(f"Error loading settings: {e}")
     
     def save_settings(self):
-        settings = QSettings("OsuAimAssist", "App")
-        
-        settings.setValue("confidence_threshold", SETTINGS["confidence_threshold"])
-        settings.setValue("assist_strength", SETTINGS["assist_strength"])
-        settings.setValue("aim_mode", SETTINGS["aim_mode"])
-        settings.setValue("capture_width", SETTINGS["capture_width"])
-        settings.setValue("capture_height", SETTINGS["capture_height"])
-        settings.setValue("model_path", SETTINGS["model_path"])
-        settings.setValue("show_overlay", SETTINGS["show_overlay"])
-        settings.setValue("target_fps", SETTINGS["target_fps"])
-        settings.setValue("always_on_top", SETTINGS["always_on_top"])
-        settings.setValue("preview_enabled", SETTINGS["preview_enabled"])
-        settings.setValue("target_class", SETTINGS["target_class"])
-        settings.setValue("input_device", SETTINGS["input_device"])
-        settings.setValue("use_play_area", SETTINGS["use_play_area"])
-        settings.setValue("simple_capture", SETTINGS["simple_capture"])
-        settings.setValue("debug_logging", SETTINGS["debug_logging"])
-    
-    def closeEvent(self, event):
-        # Save settings
-        self.save_settings()
-        
-        # Stop threads
-        if hasattr(self, 'detection_thread') and self.detection_thread is not None:
-            self.detection_thread.stop()
-        
-        super().closeEvent(event)
-
-    def show_status_message(self, message, is_error=False):
-        """Display a status message in the UI"""
-        if is_error:
-            print(f"ERROR: {message}")
-            # If there's a status bar, you could use it
-            if hasattr(self, 'statusBar'):
-                self.statusBar().showMessage(f"Error: {message}", 5000)  # Show for 5 seconds
+        try:
+            # Make sure profiles directory exists
+            os.makedirs(PROFILES_DIR, exist_ok=True)
             
-            # You could also create a QMessageBox for important errors
-            msg_box = QMessageBox()
-            msg_box.setIcon(QMessageBox.Critical)
-            msg_box.setText(f"Error: {message}")
-            msg_box.setWindowTitle("Error")
-            msg_box.exec_()
-        else:
-            print(f"INFO: {message}")
+            # Save current settings to the main settings file
+            with open(SETTINGS_FILE, 'w') as f:
+                json.dump(SETTINGS, f, indent=4)
+            
+            # Save current profile settings
+            self.save_current_profile()
+            
             if hasattr(self, 'statusBar'):
-                self.statusBar().showMessage(message, 3000)  # Show for 3 seconds
-
+                self.statusBar().showMessage("Settings saved", 2000)
+        except Exception as e:
+            print(f"Error saving settings: {e}")
+    
+    def load_profiles(self):
+        """Load available configuration profiles"""
+        try:
+            # Create profiles directory if it doesn't exist
+            os.makedirs(PROFILES_DIR, exist_ok=True)
+            
+            # Disconnect signal temporarily to prevent triggering load_profile
+            self.profile_combo.blockSignals(True)
+            
+            # Clear existing items
+            self.profile_combo.clear()
+            
+            # Get profile files
+            profile_files = [f for f in os.listdir(PROFILES_DIR) 
+                            if f.endswith('.json') and os.path.isfile(os.path.join(PROFILES_DIR, f))]
+            
+            # Add default profile if no profiles exist
+            if not profile_files:
+                self.profile_combo.addItem("Default")
+                # Save default profile
+                self.save_current_profile()
+            else:
+                # Add available profiles
+                for profile_file in profile_files:
+                    profile_name = profile_file.replace('.json', '')
+                    self.profile_combo.addItem(profile_name)
+            
+            # Select current profile
+            index = self.profile_combo.findText(SETTINGS["profile_name"])
+            if index >= 0:
+                self.profile_combo.setCurrentIndex(index)
+            else:
+                # If current profile doesn't exist, select first profile
+                self.profile_combo.setCurrentIndex(0)
+                SETTINGS["profile_name"] = self.profile_combo.currentText()
+            
+            # Reconnect signal
+            self.profile_combo.blockSignals(False)
+        except Exception as e:
+            print(f"Error loading profiles: {e}")
+    
+    def load_profile(self, profile_name):
+        """Load a specific profile by name"""
+        if not profile_name or self.profile_combo.signalsBlocked():
+            return
+            
+        try:
+            profile_path = os.path.join(PROFILES_DIR, f"{profile_name}.json")
+            
+            # Check if profile exists
+            if os.path.exists(profile_path):
+                with open(profile_path, 'r') as f:
+                    profile_settings = json.load(f)
+                
+                # Update settings with profile values
+                for key, value in profile_settings.items():
+                    if key in SETTINGS:
+                        SETTINGS[key] = value
+                
+                # Update profile name
+                SETTINGS["profile_name"] = profile_name
+                
+                # Update UI with loaded settings
+                self.confidence_slider.setValue(int(SETTINGS["confidence_threshold"] * 100))
+                self.strength_slider.setValue(int(SETTINGS["assist_strength"] * 100))
+                self.aim_mode_combo.setCurrentIndex(SETTINGS["aim_mode"])
+                
+                self.width_spinbox.setValue(SETTINGS["capture_width"])
+                self.height_spinbox.setValue(SETTINGS["capture_height"])
+                
+                self.show_overlay_check.setChecked(SETTINGS["show_overlay"])
+                self.always_top_check.setChecked(SETTINGS["always_on_top"])
+                self.play_area_check.setChecked(SETTINGS["use_play_area"])
+                self.simple_capture_check.setChecked(SETTINGS["simple_capture"])
+                self.debug_logging_check.setChecked(SETTINGS["debug_logging"])
+                self.half_precision_check.setChecked(SETTINGS["half_precision"])
+                
+                # Save updated settings
+                self.save_settings()
+                
+                self.statusBar().showMessage(f"Loaded profile: {profile_name}", 2000)
+        except Exception as e:
+            print(f"Error loading profile '{profile_name}': {e}")
+            self.statusBar().showMessage(f"Error loading profile", 2000)
+    
+    def save_profile(self):
+        """Save current settings to selected profile"""
+        profile_name = self.profile_combo.currentText()
+        if not profile_name:
+            return
+            
+        try:
+            self.save_current_profile()
+            self.statusBar().showMessage(f"Saved profile: {profile_name}", 2000)
+        except Exception as e:
+            print(f"Error saving profile '{profile_name}': {e}")
+            self.statusBar().showMessage(f"Error saving profile", 2000)
+    
+    def save_profile_as(self):
+        """Save current settings to a new profile"""
+        profile_name, ok = QInputDialog.getText(
+            self, "Save Profile As", "Enter profile name:")
+        
+        if ok and profile_name:
+            # Update current profile name
+            SETTINGS["profile_name"] = profile_name
+            
+            # Add to combobox if not exists
+            index = self.profile_combo.findText(profile_name)
+            if index < 0:
+                self.profile_combo.addItem(profile_name)
+            
+            # Select the new profile
+            index = self.profile_combo.findText(profile_name)
+            if index >= 0:
+                self.profile_combo.setCurrentIndex(index)
+            
+            # Save profile
+            self.save_current_profile()
+            
+            self.statusBar().showMessage(f"Created profile: {profile_name}", 2000)
+    
+    def delete_profile(self):
+        """Delete the selected profile"""
+        profile_name = self.profile_combo.currentText()
+        
+        # Confirm deletion
+        reply = QMessageBox.question(
+            self, "Delete Profile",
+            f"Are you sure you want to delete the profile '{profile_name}'?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                # Remove from combobox
+                index = self.profile_combo.findText(profile_name)
+                if index >= 0:
+                    self.profile_combo.removeItem(index)
+                
+                # Delete profile file
+                profile_path = os.path.join(PROFILES_DIR, f"{profile_name}.json")
+                if os.path.exists(profile_path):
+                    os.remove(profile_path)
+                
+                # Set new current profile
+                if self.profile_combo.count() > 0:
+                    SETTINGS["profile_name"] = self.profile_combo.currentText()
+                else:
+                    # Add default profile if no profiles exist
+                    self.profile_combo.addItem("Default")
+                    SETTINGS["profile_name"] = "Default"
+                
+                self.save_settings()
+                self.statusBar().showMessage(f"Deleted profile: {profile_name}", 2000)
+            except Exception as e:
+                print(f"Error deleting profile '{profile_name}': {e}")
+                self.statusBar().showMessage(f"Error deleting profile", 2000)
+    
+    def save_current_profile(self):
+        """Save current settings to a profile file"""
+        profile_name = SETTINGS["profile_name"]
+        if not profile_name:
+            profile_name = "Default"
+            SETTINGS["profile_name"] = profile_name
+        
+        try:
+            # Make sure profiles directory exists
+            os.makedirs(PROFILES_DIR, exist_ok=True)
+            
+            # Save profile to file
+            profile_path = os.path.join(PROFILES_DIR, f"{profile_name}.json")
+            with open(profile_path, 'w') as f:
+                json.dump(SETTINGS, f, indent=4)
+        except Exception as e:
+            print(f"Error saving profile '{profile_name}': {e}")
+    
     def update_input_device(self, device_type):
         """Update the input device setting"""
         SETTINGS["input_device"] = device_type
@@ -1173,6 +1388,10 @@ class MainWindow(QMainWindow):
 
     def update_debug_logging(self, state):
         SETTINGS["debug_logging"] = state
+        self.save_settings()
+
+    def update_half_precision(self, state):
+        SETTINGS["half_precision"] = state
         self.save_settings()
 
 if __name__ == "__main__":

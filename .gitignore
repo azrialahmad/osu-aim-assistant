@@ -21,7 +21,7 @@ var/
 *.egg
 *.manifest
 *.spec
-
+profiles/
 # Logs
 logs/
 *.log
