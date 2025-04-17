@@ -39,10 +39,7 @@ SETTINGS = {
     "track_slider_ball": False,      # Track slider_ball in addition to primary target
     "slider_ball_class": 2,          # Default class index for slider_ball
     "input_device": "mouse",
-    "tablet_mode": "vector_assist",  # Improved tablet handling
-    "tablet_strength_multiplier": 0.5, # Reduce tablet movement strength for better control
-    "tablet_update_frequency": 3,     # How often to apply tablet aim assist (1=every frame, 5=every 5th frame)
-    "tablet_assist_method": "direct",  # How to assist with tablet: direct, gravity, or hybrid
+    "tablet_assist_active": False,    # Whether to apply aim assist for tablet
     "use_play_area": False,
     "simple_capture": True,
     "debug_logging": False,
@@ -520,120 +517,29 @@ class DetectionThread(QThread):
     def move_mouse_relative(self, dx, dy):
         """
         Move the mouse using the appropriate method based on input device setting.
+        For tablets, only apply movement if tablet_assist_active is true.
         """
         try:
-            if SETTINGS["input_device"] == "tablet":
-                # For tablets, we use a specialized approach
-                self.apply_tablet_aim_assist(dx, dy)
-            else:
-                # For mouse, use SendInput for lower latency relative movement
+            # For tablets, only apply aim assist if explicitly enabled
+            if SETTINGS["input_device"] == "tablet" and not SETTINGS["tablet_assist_active"]:
+                # Don't interfere with tablet positioning
+                return
+                
+            # Standard mouse movement approach (works for both mouse and tablet when enabled)
+            if abs(dx) < 0.1 and abs(dy) < 0.1:
+                return  # Don't move for tiny amounts
+                
+            # Use SendInput for mouse
+            if SETTINGS["input_device"] == "mouse":
                 self.send_mouse_input(dx, dy)
-        except Exception as e:
-            print(f"Mouse movement failed ({e}), falling back to SetCursorPos")
-            try:
-                # Fallback to SetCursorPos
+            else:
+                # For tablet when assist is active, use SetCursorPos
                 curr_x, curr_y = win32api.GetCursorPos()
                 new_x = int(curr_x + dx)
                 new_y = int(curr_y + dy)
                 win32api.SetCursorPos((new_x, new_y))
-            except Exception as e2:
-                print(f"Even fallback failed: {e2}")
-    
-    # Keep track of frame counter for tablet updates
-    frame_counter = 0
-    
-    # Variables to store the desired aim position for tablet
-    target_aim_x = None
-    target_aim_y = None
-    
-    def apply_tablet_aim_assist(self, dx, dy):
-        """
-        Special tablet aim assist that works with absolute positioning tablets.
-        Rather than fighting with the tablet's position, this method influences
-        where the player should aim.
-        """
-        # Update frame counter
-        self.__class__.frame_counter += 1
-        
-        # Get current cursor position
-        curr_x, curr_y = win32api.GetCursorPos()
-        
-        # Calculate the target position
-        target_x = curr_x + dx
-        target_y = curr_y + dy
-        
-        # Store the target position globally for the class
-        self.__class__.target_aim_x = target_x
-        self.__class__.target_aim_y = target_y
-        
-        # Apply tablet update frequency limitation
-        # Only update cursor position every N frames to avoid fighting with tablet
-        update_freq = SETTINGS.get("tablet_update_frequency", 3)
-        if self.__class__.frame_counter % update_freq != 0:
-            return
-            
-        # Get tablet assist method
-        assist_method = SETTINGS.get("tablet_assist_method", "direct")
-        
-        # Get tablet strength multiplier
-        strength = SETTINGS.get("tablet_strength_multiplier", 0.5)
-        
-        if assist_method == "direct":
-            # Direct positioning - move cursor directly toward target
-            # This is used in very short bursts to avoid fighting with tablet
-            # But can cause teleporting if tablet is constantly updating
-            if abs(dx) > 5 or abs(dy) > 5:  # Only move if significant distance
-                try:
-                    # Apply reduced strength
-                    new_x = int(curr_x + dx * strength * 0.2)  # Very subtle
-                    new_y = int(curr_y + dy * strength * 0.2)
-                    
-                    # Use SetCursorPos with very low strength
-                    win32api.SetCursorPos((new_x, new_y))
-                except Exception as e:
-                    print(f"Direct tablet assist failed: {e}")
-                    
-        elif assist_method == "gravity":
-            # Gravity-based approach - create a gravitational pull toward target
-            # without directly setting cursor position
-            try:
-                # Get mouse acceleration settings
-                mouse_info = win32api.SystemParametersInfo(0x0070)  # SPI_GETMOUSE
-                
-                # Temporarily increase mouse acceleration to create "gravity" pull
-                # toward the target without directly moving cursor
-                if mouse_info and abs(dx) + abs(dy) > 10:
-                    # Enhance acceleration briefly
-                    win32api.SystemParametersInfo(0x0071, 0, (False, 0, 0))  # SPI_SETMOUSE
-                    
-                    # Wait a tiny bit
-                    time.sleep(0.005)
-                    
-                    # Restore original settings
-                    win32api.SystemParametersInfo(0x0071, 0, mouse_info)
-            except Exception as e:
-                print(f"Gravity tablet assist failed: {e}")
-                
-        elif assist_method == "hybrid":
-            # Hybrid approach - combine both methods
-            try:
-                # For small movements, use gravity
-                if 5 < abs(dx) + abs(dy) < 20:
-                    # Get mouse acceleration settings
-                    mouse_info = win32api.SystemParametersInfo(0x0070)  # SPI_GETMOUSE
-                    
-                    # Temporarily increase mouse acceleration
-                    win32api.SystemParametersInfo(0x0071, 0, (False, 0, 0))  # SPI_SETMOUSE
-                    time.sleep(0.001)
-                    win32api.SystemParametersInfo(0x0071, 0, mouse_info)
-                
-                # For large movements, use very subtle direct positioning
-                elif abs(dx) + abs(dy) >= 20:
-                    new_x = int(curr_x + dx * strength * 0.1)  # Extremely subtle
-                    new_y = int(curr_y + dy * strength * 0.1)
-                    win32api.SetCursorPos((new_x, new_y))
-            except Exception as e:
-                print(f"Hybrid tablet assist failed: {e}")
+        except Exception as e:
+            print(f"Mouse movement failed: {e}")
     
     def apply_aim_assist(self, detections, region):
         # Sort detections by class first (prioritize target class over slider ball),
@@ -1123,59 +1029,18 @@ class TabWidget(QTabWidget):
             lambda text: self.update_input_device("tablet" if text == "Tablet" else "mouse"))
         input_device_layout.addWidget(self.input_device_combo, 1)
         
-        # Tablet mode selection (only visible when tablet is selected)
-        tablet_mode_layout = QHBoxLayout()
-        tablet_mode_layout.addWidget(QLabel("Tablet Assist Method:"))
-        self.tablet_mode_combo = QComboBox()
-        self.tablet_mode_combo.addItem("Direct (Subtle Repositioning)", "direct")
-        self.tablet_mode_combo.addItem("Gravity (Acceleration Assist)", "gravity")
-        self.tablet_mode_combo.addItem("Hybrid (Combined Approach)", "hybrid")
-        
-        # Add tooltips for tablet modes
-        self.tablet_mode_combo.setItemData(0, "Subtly repositions cursor toward target (may cause minor teleporting)", Qt.ItemDataRole.ToolTipRole)
-        self.tablet_mode_combo.setItemData(1, "Temporarily changes cursor acceleration to 'pull' toward target", Qt.ItemDataRole.ToolTipRole)
-        self.tablet_mode_combo.setItemData(2, "Uses gravity for small movements, direct for large ones", Qt.ItemDataRole.ToolTipRole)
-        
-        # Set current selection based on settings
-        tablet_assist_method = SETTINGS.get("tablet_assist_method", "direct")
-        for i in range(self.tablet_mode_combo.count()):
-            if self.tablet_mode_combo.itemData(i) == tablet_assist_method:
-                self.tablet_mode_combo.setCurrentIndex(i)
-                break
-                
-        self.tablet_mode_combo.currentIndexChanged.connect(self.update_tablet_mode)
-        self.tablet_mode_combo.setEnabled(SETTINGS["input_device"] == "tablet")
-        tablet_mode_layout.addWidget(self.tablet_mode_combo, 1)
-        
-        # Tablet strength multiplier
-        tablet_strength_layout = QHBoxLayout()
-        tablet_strength_layout.addWidget(QLabel("Tablet Assist Strength:"))
-        self.tablet_strength_slider = QSlider(Qt.Orientation.Horizontal)
-        self.tablet_strength_slider.setRange(1, 100)
-        self.tablet_strength_slider.setValue(int(SETTINGS.get("tablet_strength_multiplier", 0.5) * 100))
-        self.tablet_strength_slider.valueChanged.connect(self.update_tablet_strength)
-        self.tablet_strength_slider.setEnabled(SETTINGS["input_device"] == "tablet")
-        self.tablet_strength_slider.setToolTip("Adjust strength of tablet aim assist (lower is more subtle)")
-        tablet_strength_layout.addWidget(self.tablet_strength_slider, 1)
-        
-        # Tablet update frequency
-        tablet_freq_layout = QHBoxLayout()
-        tablet_freq_layout.addWidget(QLabel("Assist Frequency:"))
-        self.tablet_freq_slider = QSlider(Qt.Orientation.Horizontal)
-        self.tablet_freq_slider.setRange(1, 10)
-        self.tablet_freq_slider.setValue(SETTINGS.get("tablet_update_frequency", 3))
-        self.tablet_freq_slider.valueChanged.connect(self.update_tablet_frequency)
-        self.tablet_freq_slider.setEnabled(SETTINGS["input_device"] == "tablet")
-        self.tablet_freq_slider.setToolTip("How often to apply the assist (1=every frame, 10=every 10th frame)")
-        tablet_freq_layout.addWidget(self.tablet_freq_slider, 1)
+        # Tablet assist toggle (only visible when tablet is selected)
+        self.tablet_assist_check = QCheckBox("Enable Aim Assist for Tablet")
+        self.tablet_assist_check.setChecked(SETTINGS["tablet_assist_active"])
+        self.tablet_assist_check.toggled.connect(self.update_tablet_assist)
+        self.tablet_assist_check.setEnabled(SETTINGS["input_device"] == "tablet")
+        self.tablet_assist_check.setToolTip("Warning: May conflict with tablet absolute positioning")
         
         # Add aim layouts
         aim_layout.addLayout(strength_layout)
         aim_layout.addLayout(aim_mode_layout)
         aim_layout.addLayout(input_device_layout)
-        aim_layout.addLayout(tablet_mode_layout)
-        aim_layout.addLayout(tablet_strength_layout)
-        aim_layout.addLayout(tablet_freq_layout)
+        aim_layout.addWidget(self.tablet_assist_check)
         
         # Add toggle button at the bottom
         self.toggle_button = QPushButton("Enable Aim Assist (F8)")
@@ -1447,21 +1312,16 @@ class TabWidget(QTabWidget):
     
     def update_input_device(self, device_type):
         SETTINGS["input_device"] = device_type
-        # Enable/disable tablet options based on device selection
-        if hasattr(self, 'tablet_mode_combo'):
-            self.tablet_mode_combo.setEnabled(device_type == "tablet")
-        if hasattr(self, 'tablet_strength_slider'):
-            self.tablet_strength_slider.setEnabled(device_type == "tablet")
-        if hasattr(self, 'tablet_freq_slider'):
-            self.tablet_freq_slider.setEnabled(device_type == "tablet")
+        # Enable/disable tablet assist checkbox
+        if hasattr(self, 'tablet_assist_check'):
+            self.tablet_assist_check.setEnabled(device_type == "tablet")
         self.settings_changed.emit()
     
-    def update_tablet_mode(self, index):
-        """Update the tablet mode setting"""
-        mode = self.tablet_mode_combo.itemData(index)
-        SETTINGS["tablet_assist_method"] = mode
+    def update_tablet_assist(self, state):
+        """Update whether aim assist is active for tablet input"""
+        SETTINGS["tablet_assist_active"] = state
         self.settings_changed.emit()
-        
+    
     def update_tablet_strength(self, value):
         """Update the tablet strength multiplier"""
         strength = value / 100.0
