@@ -39,6 +39,8 @@ SETTINGS = {
     "track_slider_ball": False,      # Track slider_ball in addition to primary target
     "slider_ball_class": 2,          # Default class index for slider_ball
     "input_device": "mouse",
+    "tablet_mode": "emulation",      # Tablet movement mode: 'absolute', 'relative', or 'emulation'
+    "tablet_strength_multiplier": 0.5, # Reduce tablet movement strength for better control
     "use_play_area": False,
     "simple_capture": True,
     "debug_logging": False,
@@ -520,17 +522,84 @@ class DetectionThread(QThread):
         """
         try:
             if SETTINGS["input_device"] == "tablet":
-                # For tablets, absolute positioning works better than relative
-                # Get current position first
-                curr_x, curr_y = win32api.GetCursorPos()
-                new_x = int(curr_x + dx)
-                new_y = int(curr_y + dy)
+                # Apply tablet-specific strength multiplier
+                dx = dx * SETTINGS["tablet_strength_multiplier"]
+                dy = dy * SETTINGS["tablet_strength_multiplier"]
                 
-                # Use direct Windows API for lowest latency
-                win32api.SetCursorPos((new_x, new_y))
+                # Different tablet handling modes
+                tablet_mode = SETTINGS.get("tablet_mode", "emulation")
+                
+                if tablet_mode == "absolute":
+                    # Traditional absolute positioning (likely to conflict with tablet)
+                    curr_x, curr_y = win32api.GetCursorPos()
+                    new_x = int(curr_x + dx)
+                    new_y = int(curr_y + dy)
+                    win32api.SetCursorPos((new_x, new_y))
+                    
+                elif tablet_mode == "relative":
+                    # Use mouse_event for relative movement
+                    # This might work better with some tablets
+                    windll = ctypes.windll.user32
+                    windll.mouse_event(
+                        0x0001,  # MOUSEEVENTF_MOVE
+                        int(dx), int(dy),
+                        0, 0
+                    )
+                    
+                elif tablet_mode == "emulation":
+                    # Emulate keyboard-based aim assist
+                    # This approach uses keyboard events to move in game
+                    # rather than fighting with the tablet for cursor control
+                    
+                    # Determine direction keys
+                    keys_to_press = []
+                    if abs(dx) > abs(dy):
+                        # Horizontal movement is primary
+                        if dx > 2:
+                            keys_to_press.append(0x27)  # RIGHT arrow key
+                        elif dx < -2:
+                            keys_to_press.append(0x25)  # LEFT arrow key
+                            
+                        # Add vertical as secondary if significant
+                        if dy > 4:
+                            keys_to_press.append(0x28)  # DOWN arrow key
+                        elif dy < -4:
+                            keys_to_press.append(0x26)  # UP arrow key
+                    else:
+                        # Vertical movement is primary
+                        if dy > 2:
+                            keys_to_press.append(0x28)  # DOWN arrow key
+                        elif dy < -2:
+                            keys_to_press.append(0x26)  # UP arrow key
+                            
+                        # Add horizontal as secondary if significant
+                        if dx > 4:
+                            keys_to_press.append(0x27)  # RIGHT arrow key
+                        elif dx < -4:
+                            keys_to_press.append(0x25)  # LEFT arrow key
+                    
+                    # Press keys for the determined directions
+                    # This simulates gentle movements in the required direction
+                    for key in keys_to_press:
+                        # Only proceed if movement is significant
+                        ctypes.windll.user32.keybd_event(
+                            key,               # Virtual key code
+                            0,                 # Hardware scan code
+                            0x0000,            # Flags: key press
+                            0                  # Extra info
+                        )
+                        # Very short delay between events
+                        time.sleep(0.001)
+                        ctypes.windll.user32.keybd_event(
+                            key,               # Virtual key code
+                            0,                 # Hardware scan code
+                            0x0002,            # Flags: key release
+                            0                  # Extra info
+                        )
             else:
                 # For mouse, use SendInput for lower latency relative movement
                 self.send_mouse_input(dx, dy)
+                
         except Exception as e:
             print(f"Mouse movement failed ({e}), falling back to SetCursorPos")
             # Fallback to SetCursorPos
@@ -1027,10 +1096,46 @@ class TabWidget(QTabWidget):
             lambda text: self.update_input_device("tablet" if text == "Tablet" else "mouse"))
         input_device_layout.addWidget(self.input_device_combo, 1)
         
+        # Tablet mode selection (only visible when tablet is selected)
+        tablet_mode_layout = QHBoxLayout()
+        tablet_mode_layout.addWidget(QLabel("Tablet Mode:"))
+        self.tablet_mode_combo = QComboBox()
+        self.tablet_mode_combo.addItem("Emulation (Arrow Keys)", "emulation")
+        self.tablet_mode_combo.addItem("Relative Movement", "relative")
+        self.tablet_mode_combo.addItem("Absolute Positioning", "absolute")
+        
+        # Add tooltips for tablet modes
+        self.tablet_mode_combo.setItemData(0, "Uses arrow key simulation to avoid conflicts with tablet positioning", Qt.ItemDataRole.ToolTipRole)
+        self.tablet_mode_combo.setItemData(1, "Uses relative mouse movements which may work better with some tablets", Qt.ItemDataRole.ToolTipRole)
+        self.tablet_mode_combo.setItemData(2, "Uses absolute cursor positioning (may conflict with tablet input)", Qt.ItemDataRole.ToolTipRole)
+        
+        # Set current selection based on settings
+        for i in range(self.tablet_mode_combo.count()):
+            if self.tablet_mode_combo.itemData(i) == SETTINGS.get("tablet_mode", "emulation"):
+                self.tablet_mode_combo.setCurrentIndex(i)
+                break
+                
+        self.tablet_mode_combo.currentIndexChanged.connect(self.update_tablet_mode)
+        self.tablet_mode_combo.setEnabled(SETTINGS["input_device"] == "tablet")
+        tablet_mode_layout.addWidget(self.tablet_mode_combo, 1)
+        
+        # Tablet strength multiplier
+        tablet_strength_layout = QHBoxLayout()
+        tablet_strength_layout.addWidget(QLabel("Tablet Sensitivity:"))
+        self.tablet_strength_slider = QSlider(Qt.Orientation.Horizontal)
+        self.tablet_strength_slider.setRange(1, 100)
+        self.tablet_strength_slider.setValue(int(SETTINGS.get("tablet_strength_multiplier", 0.5) * 100))
+        self.tablet_strength_slider.valueChanged.connect(self.update_tablet_strength)
+        self.tablet_strength_slider.setEnabled(SETTINGS["input_device"] == "tablet")
+        self.tablet_strength_slider.setToolTip("Adjust sensitivity for tablet aim assist")
+        tablet_strength_layout.addWidget(self.tablet_strength_slider, 1)
+        
         # Add aim layouts
         aim_layout.addLayout(strength_layout)
         aim_layout.addLayout(aim_mode_layout)
         aim_layout.addLayout(input_device_layout)
+        aim_layout.addLayout(tablet_mode_layout)
+        aim_layout.addLayout(tablet_strength_layout)
         
         # Add toggle button at the bottom
         self.toggle_button = QPushButton("Enable Aim Assist (F8)")
@@ -1302,6 +1407,23 @@ class TabWidget(QTabWidget):
     
     def update_input_device(self, device_type):
         SETTINGS["input_device"] = device_type
+        # Enable/disable tablet options based on device selection
+        if hasattr(self, 'tablet_mode_combo'):
+            self.tablet_mode_combo.setEnabled(device_type == "tablet")
+        if hasattr(self, 'tablet_strength_slider'):
+            self.tablet_strength_slider.setEnabled(device_type == "tablet")
+        self.settings_changed.emit()
+    
+    def update_tablet_mode(self, index):
+        """Update the tablet mode setting"""
+        mode = self.tablet_mode_combo.itemData(index)
+        SETTINGS["tablet_mode"] = mode
+        self.settings_changed.emit()
+        
+    def update_tablet_strength(self, value):
+        """Update the tablet strength multiplier"""
+        strength = value / 100.0
+        SETTINGS["tablet_strength_multiplier"] = strength
         self.settings_changed.emit()
     
     def update_capture_width(self, width):
