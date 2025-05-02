@@ -1,3 +1,5 @@
+# **DISCLAIMER** DOES NOT WORK WELL WITH TABLETS IF YOU USE ABSOLUTE POSITIONING
+
 # OSU AI Aim Assistant
 
 An AI-powered aim assist tool for OSU using YOLOv11 for target detection and high-performance screen capture.
