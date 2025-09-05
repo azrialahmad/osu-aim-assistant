@@ -9,7 +9,7 @@ An AI-powered aim assistant designed to analyze OSU! gameplay in real-time. This
 
 ### Showcase
 
-[showcase](showcase.gif)
+(showcase.gif)
 
 
 ---
